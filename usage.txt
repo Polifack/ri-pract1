@@ -1,3 +1,2 @@
 buildear: mvn package
-buildear con deps: mvn package assembly:single
 ejecutar: java -jar ./target/<file>.jar
