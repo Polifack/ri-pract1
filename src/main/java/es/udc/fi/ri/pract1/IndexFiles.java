@@ -3,6 +3,7 @@ package es.udc.fi.ri.pract1;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.FileReader;
 import java.io.IOException;
 import java.io.InputStream;
@@ -18,6 +19,8 @@ import java.nio.file.attribute.BasicFileAttributes;
 import java.util.Date;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Properties;
+import java.util.function.IntBinaryOperator;
 
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.standard.StandardAnalyzer;
@@ -38,31 +41,36 @@ public class IndexFiles {
 
 	private IndexFiles() {
 	}
-
-	private static String readFile(String fileName) throws IOException{
-		String line = null;
-		String result = "";
-		BufferedReader bufferedReader = new BufferedReader(new FileReader(fileName));
-
-		int i = 0;
-			while (((line = bufferedReader.readLine()) != null) && i < 5) {
-				result +=line+"\n";
-				i++;
-			}
-		bufferedReader.close();
-		return result;
+	interface TwoIntLambda {
+	    public int operation(int a, int b);
 	}
 	
-	private static String readFileBack(String fileName) throws IOException{
+	private void readConfig(String filePath) throws IOException {
+		FileInputStream inputStream = new FileInputStream(filePath);
+		Properties prop = new Properties();
+		
+		prop.load(inputStream);
+		String docs_nt = prop.getProperty("DOCS");
+		String partial_nt = prop.getProperty("PARTIAL_INDEXES");
+		String only_nt = prop.getProperty("ONLY_FILES");
+		
+		String[] docs = docs_nt.split(" ");
+		String[] partial = partial_nt.split(" ");
+		String[] only = only_nt.split(" ");
+	}
+	
+	private static String read5Lines(String fileName, int mode) throws IOException {
 		String result = "";
         BufferedReader br = new BufferedReader(
         		new InputStreamReader(new FileInputStream(fileName)));
-		List<String> lines = new LinkedList<String>();
+        LinkedList<String> lines = new LinkedList<String>();
 		
-		//Eliminamos la primera linea de la lista hasta que haya solo 5 lineas
+		//Remove lines until only 5. If 0 remove last, if 1 remove first
 		for(String tmp; (tmp = br.readLine()) != null;) 
-		    if (lines.add(tmp) && lines.size() > 5) 
-		        lines.remove(0);
+		    if (lines.add(tmp) && lines.size() > 5) {
+		    	if (mode == 0) lines.removeLast();
+		    	if (mode == 1) lines.remove(0);
+		    }
 		
 		for (String line : lines) {
 			result += line+"\n";
@@ -70,7 +78,6 @@ public class IndexFiles {
 		
 		br.close();
 		return result;
-		
 	}
 
 	static void indexDocs(final IndexWriter writer, Path path) throws IOException {
@@ -94,22 +101,14 @@ public class IndexFiles {
 		try (InputStream stream = Files.newInputStream(file)) {
 			Document doc = new Document();
 			
-			//Path del archivo
 			doc.add(new StringField("path", file.toString(), Field.Store.YES));
-			//Fecha de modificacion
 			doc.add(new LongPoint("modified", lastModified));
-			//Contenidos totales del archivo
 			doc.add(new TextField("contents",new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))));
-			//Hostname del indexer
 			doc.add(new StringField("hostname", InetAddress.getLocalHost().getHostName(), Field.Store.YES));
-			//Thread que indexa
 			doc.add(new StringField("thread", Thread.currentThread().getName(), Field.Store.YES));
-			//Tamaño en kbs
 			doc.add(new DoublePoint("sizeKb", (double) (new File(file.toString()).length() / 1024)));
-			//Primeras 5 lineas
-			doc.add(new TextField("top5Lines", readFile(file.toString()), Field.Store.YES)) ;
-			//Ultimas 5 lineas
-			doc.add(new TextField("bottom5Lines", readFileBack(file.toString()), Field.Store.YES)) ;
+			doc.add(new TextField("top5Lines", read5Lines(file.toString(),0), Field.Store.YES)) ;
+			doc.add(new TextField("bottom5Lines", read5Lines(file.toString(),1), Field.Store.YES)) ;
 
 			if (writer.getConfig().getOpenMode() == OpenMode.CREATE) {
 				System.out.println("adding " + file);
@@ -122,35 +121,43 @@ public class IndexFiles {
 	}
 
 	public static void main(String[] args) {
-		String usage = "java -jar IndexFiles" + " [-index INDEX_PATH] [-docs DOCS_PATH] [-update]\n\n"
-				+ "This indexes the documents in DOCS_PATH, creating a Lucene index"
-				+ "in INDEX_PATH that can be searched with SearchFiles";
+		String usage = "java -jar IndexFiles" + " [-index INDEX_PATH] [-update]\n\n";
+		
 		String indexPath = "index";
-		String docsPath = null;
+		int nThreads = Runtime.getRuntime().availableProcessors();
+		boolean partialIndex = false;
+		boolean onlyFiles = false;
 		boolean create = true;
+		OpenMode openMode = null;
+		
+		
 		for (int i = 0; i < args.length; i++) {
 			if ("-index".equals(args[i])) {
 				indexPath = args[i + 1];
 				i++;
-			} else if ("-docs".equals(args[i])) {
-				docsPath = args[i + 1];
-				i++;
 			} else if ("-update".equals(args[i])) {
 				create = false;
+			} else if ("-numThreads".equals(args[i])) {
+				nThreads = Integer.parseInt( args[i+1] );
+				i++;
+			} else if ("-openMode".equals(args[i])) {
+				openMode = IndexWriterConfig.OpenMode.valueOf(args[i+1]);
+				i++;
+			} else if("partialIndexes".equals(args[i])) {
+				partialIndex =true;
+				i++;
+			}else if("onlyFiles".equals(args[i])) {
+				onlyFiles = true;
+				i++;
 			}
 		}
-
-		if (docsPath == null) {
-			System.err.println("Usage: " + usage);
-			System.exit(1);
-		}
-
+		/* Los DOC DIR SE OBTIENEN A TRAVES DE LA CONFIG FILE
 		final Path docDir = Paths.get(docsPath);
 		if (!Files.isReadable(docDir)) {
 			System.out.println("Document directory '" + docDir.toAbsolutePath()
 					+ "' does not exist or is not readable, please check the path");
 			System.exit(1);
-		}
+		}*/
 
 		Date start = new Date();
 		try {
@@ -168,7 +175,7 @@ public class IndexFiles {
 			}
 
 			IndexWriter writer = new IndexWriter(dir, iwc);
-			indexDocs(writer, docDir);
+			//indexDocs(writer, docDir);
 
 			writer.close();
 
