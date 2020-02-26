@@ -10,16 +10,22 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.InetAddress;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.DirectoryStream;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.util.ArrayList;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Properties;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.function.IntBinaryOperator;
 
 import org.apache.lucene.analysis.Analyzer;
@@ -36,13 +42,62 @@ import org.apache.lucene.index.IndexWriterConfig.OpenMode;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FSDirectory;
+import org.apache.lucene.store.MMapDirectory;
+
+import es.udc.fi.ri.pract1.IndexFilesThreadPool.WorkerThread;
 
 public class IndexFiles {
+	
+	static boolean create;
+	
 
 	private IndexFiles() {
 	}
 	interface TwoIntLambda {
 	    public int operation(int a, int b);
+	}
+	
+	public static class WorkerThread implements Runnable {
+
+		private final Path folder; //Folder which contains the docs to index
+		private final MMapDirectory dir; //Folder where to create the index (memory)
+
+		public WorkerThread(final Path folder, final MMapDirectory dir) {
+			this.folder = folder;
+			this.dir = dir;
+		}
+
+		@Override
+		public void run() {
+			String ThreadName = Thread.currentThread().getName();
+			System.out.println(String.format("I am the thread '%s' and I am responsible for folder '%s'",
+					ThreadName, folder));
+			try {
+				System.out.println(ThreadName+": Indexing to directory '" + dir + "'...");
+
+				//Directory dir = FSDirectory.open(Paths.get(indexPath+"/"+ThreadName));
+				
+				Analyzer analyzer = new StandardAnalyzer();
+				IndexWriterConfig iwc = new IndexWriterConfig(analyzer);
+
+				if (create) {
+					iwc.setOpenMode(OpenMode.CREATE);
+				} else {
+					// Add new documents to an existing index:
+					iwc.setOpenMode(OpenMode.CREATE_OR_APPEND);
+				}
+
+				IndexWriter writer = new IndexWriter(dir, iwc);
+				//Do indexDoc to every file of folder (como indexDocs)
+				indexDocs(writer,folder,ThreadName);
+
+				writer.close();
+
+			} catch (IOException e) {
+				System.out.println(ThreadName+": caught a " + e.getClass() + "\n with message: " + e.getMessage());
+			}
+		}
+
 	}
 	
 	private void readConfig(String filePath) throws IOException {
@@ -80,24 +135,22 @@ public class IndexFiles {
 		return result;
 	}
 
-	static void indexDocs(final IndexWriter writer, Path path) throws IOException {
-		if (Files.isDirectory(path)) {
-			Files.walkFileTree(path, new SimpleFileVisitor<Path>() {
-				@Override
-				public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+	static void indexDocs(final IndexWriter writer, Path path, String thread) throws IOException {
+		Files.walkFileTree(path,new HashSet<>(),1, new SimpleFileVisitor<Path>() {
+			@Override
+			public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
+				if (!Files.isDirectory(file)) {
 					try {
-						indexDoc(writer, file, attrs.lastModifiedTime().toMillis());
+						indexDoc(writer, file, attrs.lastModifiedTime().toMillis(),thread);
 					} catch (IOException ignore) {
 					}
-					return FileVisitResult.CONTINUE;
 				}
-			});
-		} else {
-			indexDoc(writer, path, Files.getLastModifiedTime(path).toMillis());
-		}
+				return FileVisitResult.CONTINUE;
+			}
+		});
 	}
 
-	static void indexDoc(IndexWriter writer, Path file, long lastModified) throws IOException {
+	static void indexDoc(IndexWriter writer, Path file, long lastModified,String thread) throws IOException {
 		try (InputStream stream = Files.newInputStream(file)) {
 			Document doc = new Document();
 			
@@ -111,10 +164,10 @@ public class IndexFiles {
 			doc.add(new TextField("bottom5Lines", read5Lines(file.toString(),1), Field.Store.YES)) ;
 
 			if (writer.getConfig().getOpenMode() == OpenMode.CREATE) {
-				System.out.println("adding " + file);
+				System.out.println(thread +": adding " + file);
 				writer.addDocument(doc);
 			} else {
-				System.out.println("updating " + file);
+				System.out.println(thread + ": updating " + file);
 				writer.updateDocument(new Term("path", file.toString()), doc);
 			}
 		}
@@ -151,6 +204,10 @@ public class IndexFiles {
 				i++;
 			}
 		}
+		
+		final int numCores = Runtime.getRuntime().availableProcessors();
+		final ExecutorService executor = Executors.newFixedThreadPool(numCores);
+		
 		/* Los DOC DIR SE OBTIENEN A TRAVES DE LA CONFIG FILE
 		final Path docDir = Paths.get(docsPath);
 		if (!Files.isReadable(docDir)) {
@@ -158,33 +215,82 @@ public class IndexFiles {
 					+ "' does not exist or is not readable, please check the path");
 			System.exit(1);
 		}*/
+		final Path docDir = null;
+		
+		List<MMapDirectory> dirList = new ArrayList<MMapDirectory>();
 
 		Date start = new Date();
-		try {
-			System.out.println("Indexing to directory '" + indexPath + "'...");
-
-			Directory dir = FSDirectory.open(Paths.get(indexPath));
-			Analyzer analyzer = new StandardAnalyzer();
-			IndexWriterConfig iwc = new IndexWriterConfig(analyzer);
-
-			if (create) {
-				iwc.setOpenMode(OpenMode.CREATE);
-			} else {
-				// Add new documents to an existing index:
-				iwc.setOpenMode(OpenMode.CREATE_OR_APPEND);
+		MMapDirectory mmapdir = null;
+		int i = 0;
+		
+		try (DirectoryStream<Path> directoryStream = Files.newDirectoryStream(docDir)) {
+			mmapdir = new MMapDirectory(Paths.get("/tmp/LuceneIndex"));
+			dirList.add(mmapdir);
+			
+			final Runnable mainWorker = new WorkerThread(docDir,mmapdir);
+			executor.execute(mainWorker);
+			for (final Path path : directoryStream) {
+				if (Files.isDirectory(path)) {
+					mmapdir = new MMapDirectory(Paths.get("/tmp/LuceneIndex"+i++));
+					dirList.add(mmapdir);
+					
+					final Runnable worker = new WorkerThread(path,mmapdir);
+					/*
+					 * Send the thread to the ThreadPool. It will be processed eventually.
+					 */
+					executor.execute(worker);
+				}
 			}
 
-			IndexWriter writer = new IndexWriter(dir, iwc);
-			//indexDocs(writer, docDir);
-
-			writer.close();
-
-			Date end = new Date();
-			System.out.println(end.getTime() - start.getTime() + " total milliseconds");
-
-		} catch (IOException e) {
-			System.out.println(" caught a " + e.getClass() + "\n with message: " + e.getMessage());
+		} catch (final IOException e) {
+			e.printStackTrace();
+			System.exit(-1);
 		}
+		
+		
+		/*
+		 * Close the ThreadPool; no more jobs will be accepted, but all the previously
+		 * submitted jobs will be processed.
+		 */
+		executor.shutdown();
+
+		/* Wait up to 1 hour to finish all the previously submitted jobs */
+		try {
+			executor.awaitTermination(1, TimeUnit.HOURS);
+		} catch (final InterruptedException e) {
+			e.printStackTrace();
+			System.exit(-2);
+		} finally {
+			//Merge directories
+			System.out.println("Merging indexes into "+indexPath);
+			IndexWriterConfig iconfig = new IndexWriterConfig(new StandardAnalyzer());
+			
+			if (create) {
+				iconfig.setOpenMode(OpenMode.CREATE);
+			} else {
+				iconfig.setOpenMode(OpenMode.CREATE_OR_APPEND);
+			}
+			
+			IndexWriter ifusedwriter = null;
+			try {
+				Directory dir = FSDirectory.open(Paths.get(indexPath));
+				ifusedwriter = new IndexWriter(dir, iconfig);
+
+				
+				for (MMapDirectory tmp : dirList) {
+					ifusedwriter.addIndexes(tmp);
+				}
+				ifusedwriter.commit();
+				ifusedwriter.close();
+			} catch (IOException e) {
+				System.out.println(" caught a " + e.getClass() + "\n with message: " + e.getMessage());
+			}
+		}
+
+		
+		
+		Date end = new Date();
+		System.out.println(end.getTime() - start.getTime() + " total milliseconds");
 	}
 
 }
