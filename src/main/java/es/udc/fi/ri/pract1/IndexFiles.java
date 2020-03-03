@@ -3,13 +3,12 @@ package es.udc.fi.ri.pract1;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.FileNotFoundException;
-import java.io.FileReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.InetAddress;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.DirectoryStream;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -22,7 +21,9 @@ import java.util.Date;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Properties;
-import java.util.function.IntBinaryOperator;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.standard.StandardAnalyzer;
@@ -38,22 +39,81 @@ import org.apache.lucene.index.IndexWriterConfig.OpenMode;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FSDirectory;
+import org.apache.lucene.store.MMapDirectory;
+
 
 public class IndexFiles {
 	
 	static String indexPath = "index";
-	static int nThreads = Runtime.getRuntime().availableProcessors();
+	static int numCores = Runtime.getRuntime().availableProcessors();
+	static int nThreads = numCores;
 	static boolean partialIndex = false;
 	static boolean onlyFiles = false;
+	static boolean multithread = false;
 	static OpenMode openMode = OpenMode.CREATE_OR_APPEND;
 	
 	static String[] partial;
 	static List<String> fileTypes;
 	static List<Path> docsDir;
+	static boolean create;
 	
-	private IndexFiles() {
-	}
+	public static class WorkerThread implements Runnable {
 
+		private final Path folder; 
+		private final MMapDirectory dir; 
+		
+		public WorkerThread(final Path folder, final MMapDirectory dir) {
+			
+			this.folder = folder;
+			this.dir = dir;
+		}
+
+		@Override
+		public void run() {
+			String ThreadName = Thread.currentThread().getName();
+			System.out.println("[T-"+Thread.currentThread().getId()+"] Indexing folder "+folder
+					+ " at "+dir);
+			try {
+				Analyzer analyzer = new StandardAnalyzer();
+				IndexWriterConfig iwc = new IndexWriterConfig(analyzer);
+				iwc.setOpenMode(openMode);
+				IndexWriter writer = new IndexWriter(dir, iwc);
+				Files.walkFileTree(folder, new SimpleFileVisitor<Path>() {
+					@Override
+					public FileVisitResult visitFile(Path file, BasicFileAttributes attr) throws IOException {   
+						//Check if -onlyFiles is enabled
+						if (onlyFiles) {
+							//We check what type of file is this
+							String fileType = getFileExtension(file.toFile());
+							
+							//If the file extension is included add it
+							if (fileTypes.contains(fileType)) {
+								try {
+									indexDoc(writer, file, attr.lastModifiedTime().toMillis(), ThreadName);
+								} 
+								catch (IOException ignore) {
+								}
+							}
+						}
+						else {
+							try {
+								indexDoc(writer, file, attr.lastModifiedTime().toMillis(), ThreadName);
+							} 
+							catch (IOException ignore) {
+							}
+						}
+						return FileVisitResult.CONTINUE;
+					}
+				});
+				writer.close();
+
+			} catch (IOException e) {
+				System.out.println("[T-"+Thread.currentThread().getId()+"]"+": ERROR: " + e.getMessage());
+			}
+		}
+
+	}
+	
 	private static void readConfig(String filePath) throws IOException {
 		FileInputStream inputStream = new FileInputStream(filePath);
 		Properties prop = new Properties();
@@ -103,7 +163,7 @@ public class IndexFiles {
 	        return fileName.substring(fileName.lastIndexOf("."));
 	        else return "";
 	    }
-	 
+	
 	static void indexDocs(final IndexWriter writer, Path path) throws IOException {
 		if (Files.isDirectory(path)) {
 			//walkFileTree(path start, set<FileVisitOptions> options)
@@ -119,7 +179,7 @@ public class IndexFiles {
 						//If the file extension is included add it
 						if (fileTypes.contains(fileType)) {
 							try {
-								indexDoc(writer, file, attr.lastModifiedTime().toMillis());
+								indexDoc(writer, file, attr.lastModifiedTime().toMillis(), "Main Thread");
 							} 
 							catch (IOException ignore) {
 							}
@@ -127,7 +187,7 @@ public class IndexFiles {
 					}
 					else {
 						try {
-							indexDoc(writer, file, attr.lastModifiedTime().toMillis());
+							indexDoc(writer, file, attr.lastModifiedTime().toMillis(), "Main Thread");
 						} 
 						catch (IOException ignore) {
 						}
@@ -139,11 +199,11 @@ public class IndexFiles {
 				}
 			});
 		} else {
-			indexDoc(writer, path, Files.getLastModifiedTime(path).toMillis());
+			indexDoc(writer, path, Files.getLastModifiedTime(path).toMillis(),"Main Thread");
 		}
 	}
-
-	static void indexDoc(IndexWriter writer, Path file, long lastModified) throws IOException {
+	
+	static void indexDoc(IndexWriter writer, Path file, long lastModified, String thread) throws IOException {
 		try (InputStream stream = Files.newInputStream(file)) {
 			//Create doc and add fields
 			Document doc = new Document();
@@ -178,6 +238,7 @@ public class IndexFiles {
 				indexPath = args[i + 1];
 				i++;
 			} else if ("-numThreads".equals(args[i])) {
+				multithread = true;
 				nThreads = Integer.parseInt( args[i+1] );
 				i++;
 			} else if ("-openMode".equals(args[i])) {
@@ -189,6 +250,8 @@ public class IndexFiles {
 				onlyFiles = true;
 			}
 		}
+		final ExecutorService executor = Executors.newFixedThreadPool(numCores);
+		List<MMapDirectory> dirList = new ArrayList<MMapDirectory>();
 
 		System.out.println("**************************************************");
 		System.out.println("[*] Launching IndexFiles with "+nThreads+" threads.");
@@ -221,19 +284,71 @@ public class IndexFiles {
 			IndexWriterConfig iwc = new IndexWriterConfig(analyzer);
 			iwc.setOpenMode(openMode);
 
-			IndexWriter writer = new IndexWriter(dir, iwc);
+			IndexWriter writer;
+
+			writer = new IndexWriter(dir, iwc);
+			MMapDirectory mmapdir = null;
 			
+			//Para cada uno de los directorios en la config file
 			for (Path p : docsDir){
-				indexDocs(writer, p);
+				
+				if (multithread) {
+					int i = 0;
+					//Creamos un worker que se encargue de indexarlo
+					try (DirectoryStream<Path> directoryStream = Files.newDirectoryStream(p)) {
+						mmapdir = new MMapDirectory(Paths.get("/tmp/LuceneIndex"));
+						dirList.add(mmapdir);
+
+						final Runnable mainWorker = new WorkerThread(p, mmapdir);
+						executor.execute(mainWorker);
+
+						for (final Path path : directoryStream) {
+							if (Files.isDirectory(path)) {
+								mmapdir = new MMapDirectory(Paths.get("/tmp/LuceneIndex" + i++));
+								dirList.add(mmapdir);
+
+								final Runnable worker = new WorkerThread(path, mmapdir);
+								//Y enviamos el worker a la thread pool
+								executor.execute(worker);
+							}
+						}
+					} catch (final IOException e) {
+						e.printStackTrace();
+						System.exit(-1);
+					} 
+
+					//Cerramos el pool de threads
+					executor.shutdown();
+					//Le damos 1h para terminar la tarea
+					try {
+						executor.awaitTermination(1, TimeUnit.HOURS);
+					} catch (final InterruptedException e) {
+						System.out.println("[!] Timeout during index creation: "+e);
+						System.exit(-2);
+					} finally {
+						//Fusionamos los indices temporales
+						System.out.println("[*] Merging indexes into "+indexPath);
+							for (MMapDirectory tmp : dirList) {
+								writer.addIndexes(tmp);
+							}
+							writer.commit();
+							writer.close();
+					//Printeamos el tiempo
+					Date end = new Date();
+					System.out.println("[*] "+ (end.getTime() - start.getTime()) + " total milliseconds");
+					}
+				}
+				else {
+					indexDocs(writer, p);
+					writer.commit();
+					writer.close();
+
+					Date end = new Date();
+					System.out.println("[*] "+ (end.getTime() - start.getTime()) + " total milliseconds");
+				}
 			}
-
-			writer.close();
-
-			Date end = new Date();
-			System.out.println("[*] "+ (end.getTime() - start.getTime()) + " total milliseconds");
-
-		} catch (IOException e) {
-			System.out.println(" caught a " + e.getClass() + "\n with message: " + e.getMessage());
+		} catch (IOException e1) {
+			System.out.println("[!] Error during index creation: "+e1);
 		}
 	}
 }
