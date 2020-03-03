@@ -16,6 +16,8 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.SimpleFileVisitor;
 import java.nio.file.attribute.BasicFileAttributes;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Date;
 import java.util.LinkedList;
 import java.util.List;
@@ -38,14 +40,21 @@ import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FSDirectory;
 
 public class IndexFiles {
-
+	
+	static String indexPath = "index";
+	static int nThreads = Runtime.getRuntime().availableProcessors();
+	static boolean partialIndex = false;
+	static boolean onlyFiles = false;
+	static OpenMode openMode = OpenMode.CREATE_OR_APPEND;
+	
+	static String[] partial;
+	static List<String> fileTypes;
+	static List<Path> docsDir;
+	
 	private IndexFiles() {
 	}
-	interface TwoIntLambda {
-	    public int operation(int a, int b);
-	}
-	
-	private void readConfig(String filePath) throws IOException {
+
+	private static void readConfig(String filePath) throws IOException {
 		FileInputStream inputStream = new FileInputStream(filePath);
 		Properties prop = new Properties();
 		
@@ -55,8 +64,16 @@ public class IndexFiles {
 		String only_nt = prop.getProperty("ONLY_FILES");
 		
 		String[] docs = docs_nt.split(" ");
-		String[] partial = partial_nt.split(" ");
+		partial = partial_nt.split(" ");
 		String[] only = only_nt.split(" ");
+		
+		docsDir = new ArrayList<Path>();
+		for (int i = 0; i< docs.length; i++) {
+			Path docDir = Paths.get(docs[i]);
+			docsDir.add(docDir);
+		}
+		
+		fileTypes = Arrays.asList(only);
 	}
 	
 	private static String read5Lines(String fileName, int mode) throws IOException {
@@ -80,15 +97,44 @@ public class IndexFiles {
 		return result;
 	}
 
+	private static String getFileExtension(File file) {
+	        String fileName = file.getName();
+	        if(fileName.lastIndexOf(".") != -1 && fileName.lastIndexOf(".") != 0)
+	        return fileName.substring(fileName.lastIndexOf("."));
+	        else return "";
+	    }
+	 
 	static void indexDocs(final IndexWriter writer, Path path) throws IOException {
 		if (Files.isDirectory(path)) {
+			//walkFileTree(path start, set<FileVisitOptions> options)
 			Files.walkFileTree(path, new SimpleFileVisitor<Path>() {
 				@Override
-				public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
-					try {
-						indexDoc(writer, file, attrs.lastModifiedTime().toMillis());
-					} catch (IOException ignore) {
+				public FileVisitResult visitFile(Path file, BasicFileAttributes attr) throws IOException {
+			        
+					//Check if -onlyFiles is enabled
+					if (onlyFiles) {
+						//We check what type of file is this
+						String fileType = getFileExtension(file.toFile());
+						
+						//If the file extension is included add it
+						if (fileTypes.contains(fileType)) {
+							try {
+								indexDoc(writer, file, attr.lastModifiedTime().toMillis());
+							} 
+							catch (IOException ignore) {
+							}
+						}
 					}
+					else {
+						try {
+							indexDoc(writer, file, attr.lastModifiedTime().toMillis());
+						} 
+						catch (IOException ignore) {
+						}
+					}
+
+					
+
 					return FileVisitResult.CONTINUE;
 				}
 			});
@@ -99,6 +145,7 @@ public class IndexFiles {
 
 	static void indexDoc(IndexWriter writer, Path file, long lastModified) throws IOException {
 		try (InputStream stream = Files.newInputStream(file)) {
+			//Create doc and add fields
 			Document doc = new Document();
 			
 			doc.add(new StringField("path", file.toString(), Field.Store.YES));
@@ -111,80 +158,82 @@ public class IndexFiles {
 			doc.add(new TextField("bottom5Lines", read5Lines(file.toString(),1), Field.Store.YES)) ;
 
 			if (writer.getConfig().getOpenMode() == OpenMode.CREATE) {
-				System.out.println("adding " + file);
+				//System.out.println("[*] Adding " + file);
 				writer.addDocument(doc);
 			} else {
-				System.out.println("updating " + file);
+				//System.out.println("[*] Updating " + file);
 				writer.updateDocument(new Term("path", file.toString()), doc);
 			}
 		}
 	}
 
 	public static void main(String[] args) {
-		String usage = "java -jar IndexFiles" + " [-index INDEX_PATH] [-update]\n\n";
-		
-		String indexPath = "index";
-		int nThreads = Runtime.getRuntime().availableProcessors();
-		boolean partialIndex = false;
-		boolean onlyFiles = false;
-		boolean create = true;
-		OpenMode openMode = null;
-		
-		
+		String usage = 	"[*] USAGE: java -jar IndexFiles [-openmode <APPEND | CREATE | APPEND_OR_CREATE>]" + 
+						"[-onlyFiles] [-index INDEX_PATH] [-update] [-partialIndexes] "+
+						"[-numThreads NUM_THREADS]+ \n\n";
+		System.out.println(usage);
+		//Process arguments
 		for (int i = 0; i < args.length; i++) {
 			if ("-index".equals(args[i])) {
 				indexPath = args[i + 1];
 				i++;
-			} else if ("-update".equals(args[i])) {
-				create = false;
 			} else if ("-numThreads".equals(args[i])) {
 				nThreads = Integer.parseInt( args[i+1] );
 				i++;
 			} else if ("-openMode".equals(args[i])) {
 				openMode = IndexWriterConfig.OpenMode.valueOf(args[i+1]);
 				i++;
-			} else if("partialIndexes".equals(args[i])) {
+			} else if("-partialIndexes".equals(args[i])) {
 				partialIndex =true;
-				i++;
-			}else if("onlyFiles".equals(args[i])) {
+			}else if("-onlyFiles".equals(args[i])) {
 				onlyFiles = true;
-				i++;
 			}
 		}
-		/* Los DOC DIR SE OBTIENEN A TRAVES DE LA CONFIG FILE
-		final Path docDir = Paths.get(docsPath);
-		if (!Files.isReadable(docDir)) {
-			System.out.println("Document directory '" + docDir.toAbsolutePath()
-					+ "' does not exist or is not readable, please check the path");
-			System.exit(1);
-		}*/
 
+		System.out.println("**************************************************");
+		System.out.println("[*] Launching IndexFiles with "+nThreads+" threads.");
+		System.out.println("[*] The indexPath is "+indexPath);
+		System.out.println("[*] The indexMode is "+openMode);
+		System.out.println("[*] Partial indexes enable value is "+partialIndex);
+		System.out.println("[*] File extension filtering value is "+onlyFiles);
+		System.out.println("**************************************************");
+		
+		try {
+			readConfig("./IndexFiles.config");
+		} catch (IOException e1) {
+			System.out.println("[!] Cannot read ./IndexFiles.config");
+			System.exit(1);
+		}
+		
+		for (Path p : docsDir){
+			if (!Files.isReadable(p)) {
+				System.out.println("[!] Document directory '" + p.toAbsolutePath()
+						+ "' does not exist or is not readable, please check the path");
+				System.exit(1);
+			}
+		}
 		Date start = new Date();
 		try {
-			System.out.println("Indexing to directory '" + indexPath + "'...");
+			System.out.println("[*] Indexing to directory '" + indexPath + "'...");
 
 			Directory dir = FSDirectory.open(Paths.get(indexPath));
 			Analyzer analyzer = new StandardAnalyzer();
 			IndexWriterConfig iwc = new IndexWriterConfig(analyzer);
-
-			if (create) {
-				iwc.setOpenMode(OpenMode.CREATE);
-			} else {
-				// Add new documents to an existing index:
-				iwc.setOpenMode(OpenMode.CREATE_OR_APPEND);
-			}
+			iwc.setOpenMode(openMode);
 
 			IndexWriter writer = new IndexWriter(dir, iwc);
-			//indexDocs(writer, docDir);
+			
+			for (Path p : docsDir){
+				indexDocs(writer, p);
+			}
 
 			writer.close();
 
 			Date end = new Date();
-			System.out.println(end.getTime() - start.getTime() + " total milliseconds");
+			System.out.println("[*] "+ (end.getTime() - start.getTime()) + " total milliseconds");
 
 		} catch (IOException e) {
 			System.out.println(" caught a " + e.getClass() + "\n with message: " + e.getMessage());
 		}
 	}
-
 }
