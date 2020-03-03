@@ -18,6 +18,7 @@ import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Properties;
@@ -350,5 +351,10 @@ public class IndexFiles {
 		} catch (IOException e1) {
 			System.out.println("[!] Error during index creation: "+e1);
 		}
+
+		
+		
+		Date end = new Date();
+		System.out.println(end.getTime() - start.getTime() + " total milliseconds");
 	}
 }
