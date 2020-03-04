@@ -1,2 +1,5 @@
 buildear: mvn package
 ejecutar: java -jar ./target/<file>.jar
+
+ejemplo de index files:  
+java -jar ./target/IndexFiles-0.0.1-SNAPSHOT-jar-with-dependencies.jar -onlyFiles -index ./demo/mainIndex -partialIndexes -numThreads 2 -onlyFiles -openMode CREATE

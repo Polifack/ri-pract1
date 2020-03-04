@@ -8,7 +8,6 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.InetAddress;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.DirectoryStream;
 import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -18,7 +17,6 @@ import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Date;
-import java.util.HashSet;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Properties;
@@ -40,31 +38,46 @@ import org.apache.lucene.index.IndexWriterConfig.OpenMode;
 import org.apache.lucene.index.Term;
 import org.apache.lucene.store.Directory;
 import org.apache.lucene.store.FSDirectory;
-import org.apache.lucene.store.MMapDirectory;
-
 
 public class IndexFiles {
-	
-	static String indexPath = "index";
+
+	static String indexPath = "./index";
 	static int numCores = Runtime.getRuntime().availableProcessors();
 	static int nThreads = numCores;
 	static boolean partialIndex = false;
 	static boolean onlyFiles = false;
-	static boolean multithread = false;
 	static OpenMode openMode = OpenMode.CREATE_OR_APPEND;
-	
-	static String[] partial;
+
 	static List<String> fileTypes;
 	static List<Path> docsDir;
+	static List<Path> partialDir;
+
 	static boolean create;
-	
+
+	static void debug(String s) {
+		String ANSI_RESET = "\u001B[0m";
+		String ANSI_GREEN = "\u001B[32m";
+		System.out.println(ANSI_GREEN + "[*] -- " + ANSI_RESET + s);
+	}
+
+	static void error(String s) {
+		String ANSI_RESET = "\u001B[0m";
+		String ANSI_RED = "\u001B[31m";
+		System.out.println(ANSI_RED + "[!] -- " + ANSI_RESET + s);
+	}
+
+	static void printfile(String fn, char mode){
+		String ANSI_PURPLE = "\u001B[35m";
+		String ANSI_RESET = "\u001B[0m";
+		System.out.println(ANSI_PURPLE + "["+mode+"] -- " + ANSI_RESET +fn);
+	}
+
 	public static class WorkerThread implements Runnable {
 
-		private final Path folder; 
-		private final MMapDirectory dir; 
-		
-		public WorkerThread(final Path folder, final MMapDirectory dir) {
-			
+		private final Path folder;
+		private final FSDirectory dir;
+
+		public WorkerThread(final Path folder, final FSDirectory dir) {
 			this.folder = folder;
 			this.dir = dir;
 		}
@@ -72,35 +85,33 @@ public class IndexFiles {
 		@Override
 		public void run() {
 			String ThreadName = Thread.currentThread().getName();
-			System.out.println("[T-"+Thread.currentThread().getId()+"] Indexing folder "+folder
-					+ " at "+dir);
 			try {
+				//Creamos el writer
 				Analyzer analyzer = new StandardAnalyzer();
 				IndexWriterConfig iwc = new IndexWriterConfig(analyzer);
 				iwc.setOpenMode(openMode);
 				IndexWriter writer = new IndexWriter(dir, iwc);
+
+				//Navegamos el FileTree
 				Files.walkFileTree(folder, new SimpleFileVisitor<Path>() {
 					@Override
-					public FileVisitResult visitFile(Path file, BasicFileAttributes attr) throws IOException {   
-						//Check if -onlyFiles is enabled
+					public FileVisitResult visitFile(Path file, BasicFileAttributes attr) throws IOException {
+						// Check if -onlyFiles is enabled
 						if (onlyFiles) {
-							//We check what type of file is this
+							// We check what type of file is this
 							String fileType = getFileExtension(file.toFile());
-							
-							//If the file extension is included add it
+
+							// If the file extension is included add it
 							if (fileTypes.contains(fileType)) {
 								try {
 									indexDoc(writer, file, attr.lastModifiedTime().toMillis(), ThreadName);
-								} 
-								catch (IOException ignore) {
+								} catch (IOException ignore) {
 								}
 							}
-						}
-						else {
+						} else {
 							try {
 								indexDoc(writer, file, attr.lastModifiedTime().toMillis(), ThreadName);
-							} 
-							catch (IOException ignore) {
+							} catch (IOException ignore) {
 							}
 						}
 						return FileVisitResult.CONTINUE;
@@ -109,32 +120,76 @@ public class IndexFiles {
 				writer.close();
 
 			} catch (IOException e) {
-				System.out.println("[T-"+Thread.currentThread().getId()+"]"+": ERROR: " + e.getMessage());
+				error("T-" + Thread.currentThread().getId()+ ": ERROR: " + e.getMessage());
 			}
 		}
 
 	}
-	
-	private static void readConfig(String filePath) throws IOException {
-		FileInputStream inputStream = new FileInputStream(filePath);
+
+	private static void readConfig(String filePath) {
+		/* En el archivo de configuración se indican 
+		 * docs = paths de las carpetas a indexar
+		 * partials = paths de las carpetas de los indices parciales
+		 * 		- opcional
+		 * 		- tiene que haber una carpeta por cada path indicado en docs
+		 * only_files = tipo de archivos a indexar
+		 * 		- opcional */
+
+		FileInputStream inputStream;
 		Properties prop = new Properties();
 		
-		prop.load(inputStream);
-		String docs_nt = prop.getProperty("DOCS");
-		String partial_nt = prop.getProperty("PARTIAL_INDEXES");
-		String only_nt = prop.getProperty("ONLY_FILES");
-		
-		String[] docs = docs_nt.split(" ");
-		partial = partial_nt.split(" ");
-		String[] only = only_nt.split(" ");
-		
-		docsDir = new ArrayList<Path>();
-		for (int i = 0; i< docs.length; i++) {
-			Path docDir = Paths.get(docs[i]);
-			docsDir.add(docDir);
+		try {
+			inputStream = new FileInputStream(filePath);
+			prop.load(inputStream);
+		} catch (IOException e) {
+			error("Error trying to read config file: "+e);
+			e.printStackTrace();
 		}
-		
-		fileTypes = Arrays.asList(only);
+
+		//Read DOCS
+		String docs_nt = prop.getProperty("DOCS");
+		docsDir = new ArrayList<Path>();
+		if (docs_nt!=null){
+			String[] docs = docs_nt.split(" ");
+			for (int i = 0; i< docs.length; i++) {
+				Path docDir = Paths.get(docs[i]);
+				docsDir.add(docDir);
+			}
+		}
+		else{
+			error("Error trying to read config file: DOCS can't be null");
+			System.exit(-1);
+		}
+
+		//Read PARTIAL_INDEXES
+		String partial_nt = prop.getProperty("PARTIAL_INDEXES");
+		partialDir = new ArrayList<Path>();
+		if (partial_nt!=null){
+			String[] partial = partial_nt.split(" ");
+			for (int i = 0; i< partial.length; i++) {
+				Path partDir = Paths.get(partial[i]);
+				partialDir.add(partDir);
+			}
+		}		
+		else{
+			error("Error trying to read config file: PARTIAL_INDEXES can't be null");
+			System.exit(-1);
+		}
+
+		//Read ONLY_FILES
+		String only_nt = prop.getProperty("ONLY_FILES");
+		fileTypes = new ArrayList<String>();
+		if (only_nt!=null){
+			String[] only = only_nt.split(" ");
+			fileTypes = Arrays.asList(only);
+		}
+
+		//Check that if there is partial indexes
+		//there is at least one subindex per indexed folder
+		if (!(partialDir.size()==0||partialDir.size()==docsDir.size())){
+			error("Error trying to read config file: Different size of docs and partial indexes");
+			System.exit(-1);
+		}
 	}
 	
 	private static String read5Lines(String fileName, int mode) throws IOException {
@@ -167,11 +222,9 @@ public class IndexFiles {
 	
 	static void indexDocs(final IndexWriter writer, Path path) throws IOException {
 		if (Files.isDirectory(path)) {
-			//walkFileTree(path start, set<FileVisitOptions> options)
 			Files.walkFileTree(path, new SimpleFileVisitor<Path>() {
 				@Override
 				public FileVisitResult visitFile(Path file, BasicFileAttributes attr) throws IOException {
-			        
 					//Check if -onlyFiles is enabled
 					if (onlyFiles) {
 						//We check what type of file is this
@@ -193,9 +246,6 @@ public class IndexFiles {
 						catch (IOException ignore) {
 						}
 					}
-
-					
-
 					return FileVisitResult.CONTINUE;
 				}
 			});
@@ -219,27 +269,74 @@ public class IndexFiles {
 			doc.add(new TextField("bottom5Lines", read5Lines(file.toString(),1), Field.Store.YES)) ;
 
 			if (writer.getConfig().getOpenMode() == OpenMode.CREATE) {
-				//System.out.println("[*] Adding " + file);
+				printfile("Adding " + file, 'A');
 				writer.addDocument(doc);
 			} else {
-				//System.out.println("[*] Updating " + file);
+				printfile("Updating " + file, 'U');
 				writer.updateDocument(new Term("path", file.toString()), doc);
 			}
 		}
 	}
 
-	public static void main(String[] args) {
-		String usage = 	"[*] USAGE: java -jar IndexFiles [-openmode <APPEND | CREATE | APPEND_OR_CREATE>]" + 
-						"[-onlyFiles] [-index INDEX_PATH] [-update] [-partialIndexes] "+
-						"[-numThreads NUM_THREADS]+ \n\n";
-		System.out.println(usage);
-		//Process arguments
+	static void indexMulti(IndexWriter mainWriter){
+		// j -> indice de las carpetas indicadas en PARTIAL_INDEXES de IndexFiles
+		int j = 0;
+		
+		debug("Start indexMulti");
+		//Lista de directorios para despues poder mergear
+		List <FSDirectory> directory_list = new ArrayList<FSDirectory>();
+		//Iniciamos un pool de ejecutores
+		final ExecutorService executor = Executors.newFixedThreadPool(numCores);		
+		//Para todos los PATHS indicados en IndexFiles.config
+		try{
+			for (Path p:docsDir){
+				Path partialIndexPath = partialDir.get(j);
+				FSDirectory partialIndexDir = FSDirectory.open(partialIndexPath);
+				debug ("Sending "+p+ " to be indexed in "+partialIndexPath);
+				final Runnable worker = new WorkerThread(p, partialIndexDir);
+				executor.execute(worker);
+				j++;
+			}
+		}
+		catch (Exception e){
+			error("Error during multithread Indexing "+e);
+		}
+		//Cerramos el pool de ejecutores
+		executor.shutdown();
+		
+		//Le damos 1h para terminar la tarea
+		try {
+			executor.awaitTermination(1, TimeUnit.HOURS);
+		} 
+		catch (final InterruptedException e) {
+			error("Timeout during index creation: "+e);
+			System.exit(-2);
+		} 
+		finally {
+			//Fusionamos los indices temporales
+			debug("Merging indexes into "+indexPath);
+			try {
+				for (FSDirectory tmp : directory_list) {
+						mainWriter.addIndexes(tmp);
+				}
+			} catch (IOException e) {
+				error("Error during indexes merge: "+e);
+			}
+		}
+	}
+
+	static void parseArguments(String[] args){
+		String usage = 	"USAGE: java -jar IndexFiles [-openmode <APPEND | CREATE | APPEND_OR_CREATE>]" + 
+		"[-onlyFiles] [-index INDEX_PATH] [-update] [-partialIndexes] "+
+		"[-numThreads NUM_THREADS]";
+		
+		if (args[0]=="--help") System.out.println(usage);
+
 		for (int i = 0; i < args.length; i++) {
 			if ("-index".equals(args[i])) {
 				indexPath = args[i + 1];
 				i++;
 			} else if ("-numThreads".equals(args[i])) {
-				multithread = true;
 				nThreads = Integer.parseInt( args[i+1] );
 				i++;
 			} else if ("-openMode".equals(args[i])) {
@@ -251,110 +348,59 @@ public class IndexFiles {
 				onlyFiles = true;
 			}
 		}
-		final ExecutorService executor = Executors.newFixedThreadPool(numCores);
-		List<MMapDirectory> dirList = new ArrayList<MMapDirectory>();
 
-		System.out.println("**************************************************");
-		System.out.println("[*] Launching IndexFiles with "+nThreads+" threads.");
-		System.out.println("[*] The indexPath is "+indexPath);
-		System.out.println("[*] The indexMode is "+openMode);
-		System.out.println("[*] Partial indexes enable value is "+partialIndex);
-		System.out.println("[*] File extension filtering value is "+onlyFiles);
-		System.out.println("**************************************************");
+		String ANSI_GREEN = "\u001B[32m";
+		String ANSI_YELLOW = "\u001B[33m";
+
+		System.out.println(ANSI_YELLOW+"**************************************************");
+		System.out.println(ANSI_GREEN+"Launching IndexFiles with nThreads = "+ANSI_YELLOW+nThreads);
+		System.out.println(ANSI_GREEN+"The indexPath is "+ANSI_YELLOW+indexPath);
+		System.out.println(ANSI_GREEN+"The indexMode is "+ANSI_YELLOW+openMode);
+		System.out.println(ANSI_GREEN+"Partial indexes enable value is "+ANSI_YELLOW+partialIndex);
+		System.out.println(ANSI_GREEN+"File extension filtering value is "+ANSI_YELLOW+onlyFiles);
+		System.out.println(ANSI_YELLOW+"**************************************************");
+	}
+
+	public static void main(String[] args) {
+		parseArguments(args);
+		readConfig("./IndexFiles.config");
 		
-		try {
-			readConfig("./IndexFiles.config");
-		} catch (IOException e1) {
-			System.out.println("[!] Cannot read ./IndexFiles.config");
-			System.exit(1);
-		}
-		
+		//Check if paths do exist
 		for (Path p : docsDir){
 			if (!Files.isReadable(p)) {
-				System.out.println("[!] Document directory '" + p.toAbsolutePath()
+				error("Document directory '" + p.toAbsolutePath()
 						+ "' does not exist or is not readable, please check the path");
-				System.exit(1);
+				System.exit(-1);
 			}
 		}
+		
 		Date start = new Date();
+		
 		try {
-			System.out.println("[*] Indexing to directory '" + indexPath + "'...");
+			debug("Indexing to directory '" + indexPath + "'...");
 
+			//Create main index writer
 			Directory dir = FSDirectory.open(Paths.get(indexPath));
 			Analyzer analyzer = new StandardAnalyzer();
 			IndexWriterConfig iwc = new IndexWriterConfig(analyzer);
 			iwc.setOpenMode(openMode);
-
-			IndexWriter writer;
-
-			writer = new IndexWriter(dir, iwc);
-			MMapDirectory mmapdir = null;
+			IndexWriter mainWriter = new IndexWriter(dir, iwc);
 			
-			//Para cada uno de los directorios en la config file
-			for (Path p : docsDir){
-				
-				if (multithread) {
-					int i = 0;
-					//Creamos un worker que se encargue de indexarlo
-					try (DirectoryStream<Path> directoryStream = Files.newDirectoryStream(p)) {
-						mmapdir = new MMapDirectory(Paths.get("/tmp/LuceneIndex"));
-						dirList.add(mmapdir);
+			if (!partialIndex)
+				for (Path p : docsDir)
+					indexDocs(mainWriter, p);
+			else
+				indexMulti(mainWriter);
 
-						final Runnable mainWorker = new WorkerThread(p, mmapdir);
-						executor.execute(mainWorker);
-
-						for (final Path path : directoryStream) {
-							if (Files.isDirectory(path)) {
-								mmapdir = new MMapDirectory(Paths.get("/tmp/LuceneIndex" + i++));
-								dirList.add(mmapdir);
-
-								final Runnable worker = new WorkerThread(path, mmapdir);
-								//Y enviamos el worker a la thread pool
-								executor.execute(worker);
-							}
-						}
-					} catch (final IOException e) {
-						e.printStackTrace();
-						System.exit(-1);
-					} 
-
-					//Cerramos el pool de threads
-					executor.shutdown();
-					//Le damos 1h para terminar la tarea
-					try {
-						executor.awaitTermination(1, TimeUnit.HOURS);
-					} catch (final InterruptedException e) {
-						System.out.println("[!] Timeout during index creation: "+e);
-						System.exit(-2);
-					} finally {
-						//Fusionamos los indices temporales
-						System.out.println("[*] Merging indexes into "+indexPath);
-							for (MMapDirectory tmp : dirList) {
-								writer.addIndexes(tmp);
-							}
-							writer.commit();
-							writer.close();
-					//Printeamos el tiempo
-					Date end = new Date();
-					System.out.println("[*] "+ (end.getTime() - start.getTime()) + " total milliseconds");
-					}
-				}
-				else {
-					indexDocs(writer, p);
-					writer.commit();
-					writer.close();
-
-					Date end = new Date();
-					System.out.println("[*] "+ (end.getTime() - start.getTime()) + " total milliseconds");
-				}
-			}
-		} catch (IOException e1) {
-			System.out.println("[!] Error during index creation: "+e1);
+			mainWriter.commit();
+			mainWriter.close();
+			
+		} 
+		catch (IOException e) {
+			error("Error during index creation: "+e);
 		}
 
-		
-		
 		Date end = new Date();
-		System.out.println(end.getTime() - start.getTime() + " total milliseconds");
+		debug(end.getTime() - start.getTime() + " total milliseconds");
 	}
 }
