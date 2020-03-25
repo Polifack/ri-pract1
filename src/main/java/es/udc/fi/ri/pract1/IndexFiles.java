@@ -29,9 +29,11 @@ import org.apache.lucene.analysis.standard.StandardAnalyzer;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.DoublePoint;
 import org.apache.lucene.document.Field;
+import org.apache.lucene.document.FieldType;
 import org.apache.lucene.document.LongPoint;
 import org.apache.lucene.document.StringField;
 import org.apache.lucene.document.TextField;
+import org.apache.lucene.index.IndexOptions;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
 import org.apache.lucene.index.IndexWriterConfig.OpenMode;
@@ -53,6 +55,9 @@ public class IndexFiles {
 	static List<Path> partialDir;
 
 	static boolean create;
+	
+	static FieldType termVectorTextField = null;
+	static FieldType termVectorContentTextField = null;
 
 	static void debug(String s) {
 		String ANSI_RESET = "\u001B[0m";
@@ -191,6 +196,23 @@ public class IndexFiles {
 			System.exit(-1);
 		}
 	}
+	private static void createIndexType() {
+		termVectorTextField = new FieldType();
+		
+		termVectorTextField.setTokenized(true);
+		termVectorTextField.setStored(true);
+		termVectorTextField.setStoreTermVectors(true);
+		termVectorTextField.setStoreTermVectorPositions(true);
+		termVectorTextField.setIndexOptions(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS_AND_OFFSETS);
+		termVectorContentTextField = new FieldType();
+		
+		termVectorContentTextField.setTokenized(true);
+		termVectorContentTextField.setStored(false);
+		termVectorContentTextField.setStoreTermVectors(true);
+		termVectorContentTextField.setStoreTermVectorPositions(true);
+		termVectorContentTextField.setIndexOptions(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS_AND_OFFSETS);
+
+	}
 	
 	private static String read5Lines(String fileName, int mode) throws IOException {
 		String result = "";
@@ -261,12 +283,13 @@ public class IndexFiles {
 			
 			doc.add(new StringField("path", file.toString(), Field.Store.YES));
 			doc.add(new LongPoint("modified", lastModified));
-			doc.add(new TextField("contents",new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8))));
+			doc.add(new Field("contents",new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8)),termVectorContentTextField));
 			doc.add(new StringField("hostname", InetAddress.getLocalHost().getHostName(), Field.Store.YES));
 			doc.add(new StringField("thread", Thread.currentThread().getName(), Field.Store.YES));
 			doc.add(new DoublePoint("sizeKb", (double) (new File(file.toString()).length() / 1024)));
-			doc.add(new TextField("top5Lines", read5Lines(file.toString(),0), Field.Store.YES)) ;
-			doc.add(new TextField("bottom5Lines", read5Lines(file.toString(),1), Field.Store.YES)) ;
+			//doc.add(new TextField("top5Lines", read5Lines(file.toString(),0), Field.Store.YES)); cambiado para que guarde termVectors
+			doc.add(new Field("top5Lines",read5Lines(file.toString(),0),termVectorTextField));
+			doc.add(new Field("bottom5Lines", read5Lines(file.toString(),1), termVectorTextField)) ;
 
 			if (writer.getConfig().getOpenMode() == OpenMode.CREATE) {
 				printfile("Adding " + file, 'A');
@@ -376,7 +399,10 @@ public class IndexFiles {
 		
 		Date start = new Date();
 		
+		createIndexType();
+		
 		try {
+			
 			debug("Indexing to directory '" + indexPath + "'...");
 
 			//Create main index writer
