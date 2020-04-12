@@ -25,7 +25,9 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import org.apache.lucene.analysis.Analyzer;
+import org.apache.lucene.analysis.TokenStream;
 import org.apache.lucene.analysis.standard.StandardAnalyzer;
+import org.apache.lucene.analysis.tokenattributes.CharTermAttribute;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.DoublePoint;
 import org.apache.lucene.document.Field;
@@ -235,6 +237,28 @@ public class IndexFiles {
 		return result;
 	}
 
+	private static String readWholeDoc(String filename) throws IOException{
+		String content = "";
+		BufferedReader br = new BufferedReader(
+				new InputStreamReader(new FileInputStream(filename)));
+		for (String tmp; (tmp=br.readLine())!=null;){
+			content+=tmp+"\n";
+		}
+		br.close();
+		return content;
+	}
+
+	private List<String> analyze(String text, Analyzer analyzer) throws IOException{
+		List<String> result = new ArrayList<String>();
+		TokenStream tokenStream = analyzer.tokenStream("FIELD_NAME", text);
+		CharTermAttribute attr = tokenStream.addAttribute(CharTermAttribute.class);
+		tokenStream.reset();
+		while(tokenStream.incrementToken()) {
+			result.add(attr.toString());
+		}
+		return result;
+	}
+
 	private static String getFileExtension(File file) {
 	        String fileName = file.getName();
 	        if(fileName.lastIndexOf(".") != -1 && fileName.lastIndexOf(".") != 0)
@@ -277,19 +301,38 @@ public class IndexFiles {
 	}
 	
 	static void indexDoc(IndexWriter writer, Path file, long lastModified, String thread) throws IOException {
+
+		FieldType TYPE_STORED = new FieldType();
+		TYPE_STORED.setIndexOptions(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS_AND_OFFSETS);
+		TYPE_STORED.setTokenized(true);
+		TYPE_STORED.setStored(true);
+		TYPE_STORED.setStoreTermVectors(true);
+		TYPE_STORED.setStoreTermVectorPositions(true);
+		TYPE_STORED.freeze();
+
+		FieldType DocumentBody = new FieldType();
+		DocumentBody.setIndexOptions(IndexOptions.DOCS_AND_FREQS_AND_POSITIONS_AND_OFFSETS);
+		DocumentBody.setTokenized(true);
+		DocumentBody.setStored(false);
+		DocumentBody.setStoreTermVectors(true);
+		DocumentBody.setStoreTermVectorPositions(true);
+		DocumentBody.freeze();
+
 		try (InputStream stream = Files.newInputStream(file)) {
 			//Create doc and add fields
 			Document doc = new Document();
 			
 			doc.add(new StringField("path", file.toString(), Field.Store.YES));
 			doc.add(new LongPoint("modified", lastModified));
-			doc.add(new Field("contents",new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8)),termVectorContentTextField));
+			//doc.add(new Field("contents",new BufferedReader(new InputStreamReader(stream, StandardCharsets.UTF_8)),termVectorContentTextField));
+			doc.add(new Field("contents", readWholeDoc(file.toString()),DocumentBody));
 			doc.add(new StringField("hostname", InetAddress.getLocalHost().getHostName(), Field.Store.YES));
 			doc.add(new StringField("thread", Thread.currentThread().getName(), Field.Store.YES));
 			doc.add(new DoublePoint("sizeKb", (double) (new File(file.toString()).length() / 1024)));
 			//doc.add(new TextField("top5Lines", read5Lines(file.toString(),0), Field.Store.YES)); cambiado para que guarde termVectors
-			doc.add(new Field("top5Lines",read5Lines(file.toString(),0),termVectorTextField));
-			doc.add(new Field("bottom5Lines", read5Lines(file.toString(),1), termVectorTextField)) ;
+
+			doc.add(new Field("top5Lines",read5Lines(file.toString(),0),TYPE_STORED));
+			doc.add(new Field("bottom5Lines", read5Lines(file.toString(),1), TYPE_STORED)) ;
 
 			if (writer.getConfig().getOpenMode() == OpenMode.CREATE) {
 				printfile("Adding " + file, 'A');
