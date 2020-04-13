@@ -31,14 +31,41 @@ public class SimilarDocs {
 	static int docId;
 	static String representation = null;
 	static Similarity similarity = null;
-	private static Set<String> terms = new HashSet<>();
+	private static List<SimilarDocument> similarDocumentList = new ArrayList<>();
+	private static final Set<String> terms = new HashSet<>();
 
+	private static class SimilarDocument {
+		double similarity;
+		int id;
+		String path;
+		public SimilarDocument(double similarity,int id,String path) {
+			this.similarity = similarity;
+			this.id = id;
+			this.path = path;
+		}
+	}
+	static void addSimilarDocumentList(double similarity, int id,Document doc) {
+
+		if (similarDocumentList.size() >= 10) return;
+		for (int i = 0; i < similarDocumentList.size(); i++)  {
+			if (similarity >= similarDocumentList.get(i).similarity) {
+				similarDocumentList.add(i, new SimilarDocument(similarity,id, doc.get("path")));
+				return;
+			}
+		}
+		similarDocumentList.add(new SimilarDocument(similarity,id, doc.get("path")));
+		return;
+	}
+	
 	static Map<String, Integer> getTermFrequencies(IndexReader reader, int id) throws IOException {
 		System.out.println("[*] Retrieving Term Vector for the document with id: "+id);
 		//Obtenemos el TermVector para el field 'field' para el documento de id 'id'
 		Terms vector = reader.getTermVector(id, field);
 		System.out.println("Vector: "+vector);
 
+		if (vector == null) {
+			return null; //Cuando el campo field no existe en el documento, vector es null
+		}
 		TermsEnum termsEnum = null;
 		termsEnum = vector.iterator();
 
@@ -53,7 +80,9 @@ public class SimilarDocs {
 			int freq = (int) termsEnum.totalTermFreq();
 			System.out.println("Storeando "+term+" con frecuencia "+freq);
 			frequencies.put(term, freq);
-			terms.add(term);
+			if (docId == id) { //no se si esto esta bien pero parece lo más lógico
+				terms.add(term);
+			}
 		}
 		System.out.println("Frequencies: "+frequencies);
 		return frequencies;
@@ -95,23 +124,16 @@ public class SimilarDocs {
 			}
 		}
 	}
-	public static void getBestDocuments(){
-		/*
-		 * l = new List<float, indexlemenet>
-		 * foreach element in the index
-		 * compute similarity.tf() or similarity.idf() or similarity.bin()
-		 * l.add(similarity,element)
-		 * sort l by similarity
-		 * return 10 highest values of l
-		 */
-	}
 	static double getCosineSimilarity(RealVector v1, RealVector v2) {
 		System.out.println(v1.getNorm());
+		System.out.println(v1.getDimension());
 		System.out.println(v2.getNorm());
+		System.out.println(v2.getDimension());
 		return (v1.dotProduct(v2)) / (v1.getNorm() * v2.getNorm());
 	}
 	static RealVector toRealVector(Map<String, Integer> map) {
-		System.out.println("Terms size: "+terms);
+		if (map == null) return null;
+		System.out.println("Terms size: "+terms.size());
 		RealVector vector = new ArrayRealVector(terms.size());
 		int i = 0;
 		for (String term : terms) {
@@ -149,34 +171,42 @@ public class SimilarDocs {
 		RealVector vr = toRealVector(tr);
 
 		for (int i = 0; i < indexReader.numDocs(); i++) {
-
-			try {
-				doc = indexReader.document(i);
-			} catch (CorruptIndexException e1) {
-				System.out.println("Graceful message: exception " + e1);
-				e1.printStackTrace();
-			} catch (IOException e1) {
-				System.out.println("Graceful message: exception " + e1);
-				e1.printStackTrace();
+			if (i != docId) {
+				try {
+					doc = indexReader.document(i);
+				} catch (CorruptIndexException e1) {
+					System.out.println("Graceful message: exception " + e1);
+					e1.printStackTrace();
+				} catch (IOException e1) {
+					System.out.println("Graceful message: exception " + e1);
+					e1.printStackTrace();
+				}
+	
+				System.out.println("\n\nDocumento " + i +" "+ doc.get("path"));
+	
+				fields = doc.getFields();
+	
+				RealVector vi = toRealVector(getTermFrequencies(indexReader,i));
+				if (vi != null) {
+					double similarity = getCosineSimilarity(vr,vi);
+					System.out.println("SIMILARITY= "+similarity);
+					
+					addSimilarDocumentList(similarity,i,doc);
+		
+		
+					for (IndexableField field : fields) {
+						String fieldName = field.name();
+						System.out.println(fieldName + ": " + doc.get(fieldName));
+					}
+				}
 			}
 
-			System.out.println("Documento " + i);
-
-			fields = doc.getFields();
-			// Note doc.getFields() gets the stored fields
-
-
-
-			RealVector vi = toRealVector(getTermFrequencies(indexReader,i));
-			getCosineSimilarity(vr,vi);
-
-
-
-			for (IndexableField field : fields) {
-				String fieldName = field.name();
-				System.out.println(fieldName + ": " + doc.get(fieldName));
-			}
-
+		}
+		System.out.println("\n\n\n-----------------RESULTADOS-----------------\n\n");
+		int j = 0;
+		for (SimilarDocument similarDoc : similarDocumentList) {
+			j++;
+			System.out.println(j+". Document: "+similarDoc.path+",Id: "+similarDoc.id+", Similarity: "+similarDoc.similarity);
 		}
 		try {
 			indexReader.close();
